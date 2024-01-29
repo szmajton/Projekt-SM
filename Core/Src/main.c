@@ -29,16 +29,18 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "BMPXX80.h"
-#include "lcd16x2.h"
+
+//#include "lcd16x2.h"
 #include "math.h"
-#include "bmp280.h"
-#include "bmp280_defs.h"
+
+#include "bmp2.h"
+#include "bmp2_config.h"
+#include "bmp2_defs.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <arm_math.h>
-
+#include "pid_controller_config.h"
 
 /* USER CODE END Includes */
 
@@ -62,17 +64,22 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-float target_temp;
-float current_temp;
-uint16_t duty = 0;
-_Bool czy_ustawiono = false;
-arm_pid_instance_f32 PID;
-/* Zmienne do komunikacji z UART */
-int flag = 0;
-char data[4];
-uint8_t want_uart;
+int temp_current_int;
+int temp_frac;
+int temp_target_int;
+int temp_target_frac;
+float temp_current, uchyb, target_temp, pid_o;
+char buffer[128];
+float duty;
+#define RX_BUFFER_SIZE 128
+char rxbuffer[RX_BUFFER_SIZE];
+char ostrxbuffer[RX_BUFFER_SIZE];
+int flag =0;
+static uint32_t p_env;
 uint8_t msg[3];
 uint16_t Sizemsg = 3;
+int czy_ustawiono =0;
+
 
 /* USER CODE END PV */
 
@@ -80,39 +87,30 @@ uint16_t Sizemsg = 3;
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 /* Odczytywanie danych z czujnika */
-int8_t spi_reg_read(uint8_t cs, uint8_t reg_addr , uint8_t *reg_data , uint16_t length)
+void set_pwm(TIM_HandleTypeDef *htim, float pow)
 {
-  HAL_StatusTypeDef status = HAL_OK;
-  int32_t iError = BMP280_OK;
-  uint8_t txarray[SPI_BUFFER_LEN] = {0,};
-  uint8_t rxarray[SPI_BUFFER_LEN] = {0,};
-  uint8_t stringpos;
- txarray[0] = reg_addr;
- HAL_GPIO_WritePin( SPI4_CS_GPIO_Port , SPI4_CS_Pin , GPIO_PIN_RESET );
- status = HAL_SPI_TransmitReceive( &hspi4 , (uint8_t*)(&txarray), (uint8_t*)(&rxarray), length+1, 5);
- while( hspi4.State == HAL_SPI_STATE_BUSY ) {};
- HAL_GPIO_WritePin( SPI4_CS_GPIO_Port , SPI4_CS_Pin , GPIO_PIN_SET );
- for (stringpos = 0; stringpos < length; stringpos++)
- {
-	 *(reg_data + stringpos) = rxarray[stringpos + BMP280_DATA_INDEX];
- }
-
+	if(pow==0){
+		__HAL_TIM_SET_COMPARE(htim,TIM_CHANNEL_1,0);
+	}
+	uint32_t cp = htim->Init.Period;
+	uint32_t pv = (cp*pow)/100.f;
+	__HAL_TIM_SET_COMPARE(htim,TIM_CHANNEL_1,(uint32_t)pv);
 }
-int8_t spi_reg_write(uint8_t cs, uint8_t reg_addr , uint8_t *reg_data , uint16_t length)
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-HAL_StatusTypeDef status = HAL_OK;
-int32_t iError = BMP280_OK;
-uint8_t txarray[SPI_BUFFER_LEN * BMP280_ADDRESS_INDEX];
-uint8_t stringpos;
-txarray[0] = reg_addr;
-for (stringpos = 0; stringpos < length; stringpos++)
-{
-	txarray[stringpos+BMP280_DATA_INDEX] = reg_data[stringpos];
-}
- HAL_GPIO_WritePin( SPI4_CS_GPIO_Port , SPI4_CS_Pin , GPIO_PIN_RESET );
- status = HAL_SPI_Transmit( &hspi4 , (uint8_t*)(&txarray), length*2, 100);
- while( hspi4.State == HAL_SPI_STATE_BUSY ) {};
- HAL_GPIO_WritePin( SPI4_CS_GPIO_Port , SPI4_CS_Pin , GPIO_PIN_SET );
+	if(htim==&htim3)
+	{
+		temp_current = BMP2_ReadTemperature_degC(&bmp2dev_1);
+		temp_current_int = (int)temp_current;
+		temp_frac = (int)((temp_current - temp_current_int)*1000);
+		if(flag ==1){
+			flag=0;
+		}
+		duty = PID_GetOutput(&hpid1, target_temp, temp_current);
+		set_pwm(&htim3, duty);
+		int size = sprintf(buffer, "Temp:  %f [C]\n\r", temp_current);
+		HAL_UART_Transmit(&huart3, (uint8_t*)buffer, size, 200);
+	}
 }
 /* USER CODE END PFP */
 
@@ -131,14 +129,8 @@ for (stringpos = 0; stringpos < length; stringpos++)
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-	/* Inicjalizacja parametrów czujnika i  zmienne do odczytania temperatury */
-	struct bmp280_uncomp_data ucomp_data;
-	struct bmp280_dev bmp;
-	struct bmp280_config conf;
-	int8_t rslt;
-	double temp;
-	char buffer[40];
-	uint8_t size;
+
+
 
   /* USER CODE END 1 */
 
@@ -169,50 +161,26 @@ int main(void)
   MX_TIM4_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
-  HAL_UART_Receive_IT(&huart3, msg, Sizemsg);
-  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); /* Sygnał PWM */
-  HAL_TIM_Base_Start_IT(&htim1);
-  HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL); /*Enkoder */
   /* Inicjalizacja danych czujnika BMP280 */
-  bmp.delay_ms = HAL_Delay;
-  bmp.dev_id = 0;
-  bmp.intf = BMP280_SPI_INTF;
-  bmp.read = spi_reg_read;
-  bmp.write = spi_reg_write;
-  rslt = bmp280_init(&bmp);
-  rslt = bmp280_get_config(&conf, &bmp);
-  conf.filter = BMP280_FILTER_COEFF_2;
-  conf.os_temp = BMP280_OS_4X;
-  conf.odr = BMP280_ODR_1000_MS;
-  rslt = bmp280_set_config(&conf, &bmp);
-  rslt = bmp280_set_power_mode(BMP280_NORMAL_MODE, &bmp);
+  BMP2_Init(&bmp2dev_1);
+
+  HAL_UART_Receive_IT(&huart3, msg, Sizemsg);
+ // HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); /* Sygnał PWM */
+ // HAL_TIM_Base_Start_IT(&htim1);
+ // HAL_TIM_Base_Start_IT(&htim3);
+  HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL); /*Enkoder */
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  PID_Init(&hpid1);
+  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); /* Sygnał PWM */
+  HAL_TIM_Base_Start_IT(&htim3);
+
   while (1)
   {
-	 rslt = bmp280_get_uncomp_data(&ucomp_data, &bmp);
-	 rslt = bmp280_get_comp_temp_double(&temp, ucomp_data.uncomp_temp, &bmp);
-	 current_temp = temp;
-	/*Jeśli nie ustalono jeszcze temperatury */
-	 if(czy_ustawiono == false)
-	 {
-		 target_temp = current_temp;
-	  }
-	 if (duty > 100) {
-	     duty = 100;
-	  } else if (duty < -100) {
-	     duty = -100;
-	  }
-	 /* Sending temperature to terminal */
-	  size = sprintf(buffer, "Temp:  %f [C]\n\r", current_temp);
-	  HAL_UART_Transmit(&huart3, (uint8_t*)buffer, size, 200);
-	  if(target_temp > current_temp){
-	      __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 100*duty);
-	     }
-	  bmp.delay_ms(1000);
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -273,7 +241,7 @@ void SystemClock_Config(void)
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-_Bool niepoprawne;
+int niepoprawne;
 /* Wysylanie danych do UART i sprawdzanie czy wartosc jest poprawna */
 HAL_UART_Receive_IT(&huart3, msg, Sizemsg);
 if(msg[0]>47 && msg[0]<58){
@@ -282,15 +250,15 @@ if(msg[0]>47 && msg[0]<58){
 		int jednosci = msg[1] - '0';
 		if(msg[2]>47 && msg[2]<58){
 			int dziesietne = msg[2] - '0';
-			niepoprawne = false;
+			niepoprawne = 0;
 			target_temp = 10.0 * dziesiatki + jednosci + dziesietne / 10.0;
-			czy_ustawiono = true;
+			czy_ustawiono = 1;
 	}
   }
 }
 
 /* Jesli jest zly format wysylanej wartosci */
-if(niepoprawne == true){
+if(niepoprawne == 1){
 	char buf[20];
 	uint8_t err_msg = sprintf(buf, "Zly format\n\r");
 	HAL_UART_Transmit(&huart3, (uint8_t*)buf, err_msg, 100);
