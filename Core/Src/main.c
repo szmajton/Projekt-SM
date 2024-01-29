@@ -72,6 +72,7 @@ int czy_ustawiono =0;
 arm_pid_instance_f32 PID;     /* PID*/
 float duty = 0;          /* PWM */
 uint32_t p_env;
+uint32_t env;
 /* Komunikacja z UART */
 uint8_t want_uart;
 int flag = 0;
@@ -127,6 +128,7 @@ if (status != HAL_OK)
 }
 return (int8_t)iError;
 }
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -151,7 +153,7 @@ int main(void)
 		struct bmp280_uncomp_data ucomp_data;
 	        /* Parametry do wysłania temperatury */
 		double temp;
-		char buffer[40];
+		char buffer[128];
 		uint8_t size;
 
   /* USER CODE END 1 */
@@ -198,6 +200,7 @@ int main(void)
   rslt = bmp280_set_power_mode(BMP280_NORMAL_MODE, &bmp);
   arm_pid_init_f32(&PID, 1);	/* Inicjalizacja PID*/
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); /* PWM grzałki */
+  HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
   //HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); PWM wiatraka miał być
   HAL_UART_Receive_IT(&huart3, msg, Sizemsg); /* UART */
   LCD_init(); /* Ekran LCD */
@@ -219,12 +222,44 @@ int main(void)
   }
 
   /* Wysyłanie temperatury za pomocą UART */
-  size = sprintf(buffer, "Temp:  %f [C]\n\r", current_temp);
+  size = sprintf(buffer, "\"Temp\":%f[C],\"Uchyb\":%f,\"Moc PWM\":%f\n\r", current_temp,e,duty);
   HAL_UART_Transmit(&huart3, (uint8_t*)buffer, size, 200);
   LCD_goto_line(0);
   LCD_printf("Temp:%f[C]", current_temp);
-  LCD_goto_line(1);
-  LCD_printf("Set:%f[C]", target_temp);
+  /* Nastawienie temperatury poprzez enkoder */
+  env  = __HAL_TIM_GET_COUNTER(&htim4);
+  	if(env != p_env)
+  	{
+  		if(env > p_env - 1)
+  		{
+  			target_temp += 0.5;
+  			flag=1;
+  		}
+  		else if(env < p_env + 1)
+  		{
+  			target_temp -= 0.5;
+  			flag=1;
+  		}
+
+  		if(target_temp > 30.0)
+  		{
+  			target_temp = 30.0;
+
+  		}
+  		else if(target_temp < 24.0)
+  		{
+  			target_temp = 24.0;
+  		}
+
+  		LCD_goto_line(1);
+  		LCD_printf("Set:%f[C]", target_temp);
+
+  		p_env = env;
+  	}
+  	LCD_goto_line(1);
+  	LCD_printf("Set:%f[C]", target_temp);
+  //LCD_goto_line(1);
+//LCD_printf("Set:%f[C]", target_temp);
 
   /* Uchyb */
   e = target_temp - current_temp;
@@ -313,11 +348,19 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 int poprawna = 0;
 /* Sprawdzanie czy podane dane to liczby */
 HAL_UART_Receive_IT(&huart3, msg, Sizemsg);
-if(msg[0]>47 && msg[0]<58){
+if(msg[0]>47 && msg[0]<58)
+
+{
 	int dziesiatki = msg[0] - '0';
-	if(msg[1]>47 && msg[1]<58){
+
+	if(msg[1]>47 && msg[1]<58)
+	{
+
 		int jednosci = msg[1] - '0';
-		if(msg[2]>47 && msg[2]<58){
+
+		if(msg[2]>47 && msg[2]<58)
+
+		{
 
 			int dziesiatne = msg[2] - '0';
 			poprawna = 1;
