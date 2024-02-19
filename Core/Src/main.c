@@ -69,6 +69,7 @@ float current_temp;           /* Aktualna temperatura */
 float target_temp;              /* Zadana temperatura */
 float e;             			/* Błąd */
 int czy_ustawiono =0;
+int target_temp_int, current_temp_int;
 arm_pid_instance_f32 PID;     /* PID*/
 float duty = 0;          /* PWM */
 uint32_t p_env;
@@ -79,6 +80,14 @@ int flag = 0;
 char data[3];
 uint8_t msg[3];
 uint16_t Sizemsg = 3;
+int8_t rslt;
+struct bmp280_dev bmp;
+struct bmp280_config conf;
+struct bmp280_uncomp_data ucomp_data;
+/* Parametry do wysłania temperatury */
+double temp;
+char buffer[128];
+uint8_t size;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -128,7 +137,83 @@ if (status != HAL_OK)
 }
 return (int8_t)iError;
 }
+/**
+ * @brief This function sets the desired temperature by encoder.
+ * @param[in] Desired temperature.
+ * @return [out] Desired temperature.
+ */
+/*float enkoder(float desired_temp){
+env  = __HAL_TIM_GET_COUNTER(&htim4);
+	if(env != p_env)
+	{
+		if(env > p_env - 1)
+		{
+			desired_temp += 0.5;
+			flag=1;
+		}
+		else if(env < p_env + 1)
+		{
+			desired_temp -= 0.5;
+			flag=1;
+		}
 
+		if(desired_temp > 30.0)
+		{
+			desired_temp = 30.0;
+
+		}
+		else if(desired_temp < 24.0)
+		{
+			desired_temp = 24.0;
+		}
+
+		LCD_goto_line(1);
+		LCD_printf("Set:%f[C]", desired_temp);
+
+		p_env = env;
+	}
+	return desired_temp;
+}*/
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{ if(htim==&htim2){
+
+	  rslt = bmp280_get_uncomp_data(&ucomp_data, &bmp);
+
+	   /* Zkompensowana temperatura jako liczba zmiennoprzecinkowa */
+	  rslt = bmp280_get_comp_temp_double(&temp, ucomp_data.uncomp_temp, &bmp);
+	  current_temp = temp;
+	  /* Flaga jeśli nie określono temperatury */
+	   if(flag == 0){
+	 	  target_temp = current_temp;
+	   }
+	  /* Uchyb */
+		  e = target_temp - current_temp;
+		  /* Sprawdzanie czy jest overflow w % */
+		  duty = arm_pid_f32(&PID, target_temp - current_temp);
+		  	    if (duty > 100) {
+		  	        duty = 100;
+		  	     } else if (duty < -100) {
+		  	        duty = -100;
+		  	     }
+
+
+		  /* Cykl PWM dla włączenia i wyłączenia grzałki */
+		  	     if(target_temp > current_temp){
+		  	       __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 10*duty);
+		  	       __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0*duty);
+		  	     }
+		  	     else if(target_temp < current_temp){
+		  	   	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0*duty);
+		  	   	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, -10*duty);
+		  	    }
+
+	  /* Wysyłanie temperatury za pomocą UART */
+	  size = sprintf(buffer, "\"Temp\":%f[C],\"Uchyb\":%f,\"Moc PWM\":%f, \"Set\":%f[C]\n\r", current_temp,e,duty,target_temp);
+	  HAL_UART_Transmit(&huart3, (uint8_t*)buffer, size, 1000);
+
+}
+
+}
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -146,15 +231,8 @@ int main(void)
 		PID.Kp = PID_PARAM_KP;        /* Proporcional */
 		PID.Ki = PID_PARAM_KI;        /* Integral */
 		PID.Kd = PID_PARAM_KD;        /* Derivative */
-	        /* Inicjalizacja parametrów czujnika i  zmienne do odczytania temperatury */
-		int8_t rslt;
-		struct bmp280_dev bmp;
-		struct bmp280_config conf;
-		struct bmp280_uncomp_data ucomp_data;
-	        /* Parametry do wysłania temperatury */
-		double temp;
-		char buffer[128];
-		uint8_t size;
+
+
 
   /* USER CODE END 1 */
 
@@ -184,6 +262,8 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM4_Init();
   MX_I2C1_Init();
+  MX_TIM2_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
   /* Init BMP280 */
   bmp.delay_ms = HAL_Delay;
@@ -201,9 +281,13 @@ int main(void)
   arm_pid_init_f32(&PID, 1);	/* Inicjalizacja PID*/
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); /* PWM grzałki */
   HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
-  //HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1); PWM wiatraka miał być
   HAL_UART_Receive_IT(&huart3, msg, Sizemsg); /* UART */
+  HAL_TIM_Base_Start_IT(&htim3);
   LCD_init(); /* Ekran LCD */
+ // HAL_NVIC_SetPriority(USART3_IRQn, 5, 0);
+  //HAL_NVIC_SetPriority(TIM3_IRQn, 6, 0);
+  //HAL_NVIC_SetPriority(TIM2_IRQn, 7, 0);
+  HAL_TIM_Base_Start_IT(&htim2);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -211,21 +295,15 @@ int main(void)
   while (1)
   {
 
+	  LCD_goto_line(0);
+	  LCD_printf("Temp:%f[C]", current_temp);
 
-  rslt = bmp280_get_uncomp_data(&ucomp_data, &bmp);
-   /* Zkompensowana temperatura jako liczba zmiennoprzecinkowa */
-  rslt = bmp280_get_comp_temp_double(&temp, ucomp_data.uncomp_temp, &bmp);
-  current_temp = temp;
-  /* Flaga jeśli nie określono temperatury */
-  if(flag == 0){
-	  target_temp = current_temp;
-  }
 
-  /* Wysyłanie temperatury za pomocą UART */
-  size = sprintf(buffer, "\"Temp\":%f[C],\"Uchyb\":%f,\"Moc PWM\":%f\n\r", current_temp,e,duty);
-  HAL_UART_Transmit(&huart3, (uint8_t*)buffer, size, 200);
-  LCD_goto_line(0);
-  LCD_printf("Temp:%f[C]", current_temp);
+
+
+
+
+
   /* Nastawienie temperatury poprzez enkoder */
   env  = __HAL_TIM_GET_COUNTER(&htim4);
   	if(env != p_env)
@@ -258,31 +336,13 @@ int main(void)
   	}
   	LCD_goto_line(1);
   	LCD_printf("Set:%f[C]", target_temp);
+  //target_temp = enkoder(target_temp);
   //LCD_goto_line(1);
 //LCD_printf("Set:%f[C]", target_temp);
 
-  /* Uchyb */
-  e = target_temp - current_temp;
-  /* Zwrócenie danych wyjściowych i użycie ich jako parametru wsp. wypełnienia */
-  duty = arm_pid_f32(&PID, target_temp - current_temp);
 
-  /* Sprawdzanie czy jest overflow w % */
-  if (duty > 100) {
-     duty = 100;
-  } else if (duty < -100) {
-     duty = -100;
-  }
-  /* Cykl PWM dla włączenia i wyłączenia grzałki */
-  if(target_temp > current_temp){
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 10*duty);
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, 0*duty);
-  }
-  else if(target_temp < current_temp){
-	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 0*duty);
-	__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, -10*duty);
- }
 
-  bmp.delay_ms(1000);
+  //bmp.delay_ms(1500);
 
     /* USER CODE END WHILE */
 
